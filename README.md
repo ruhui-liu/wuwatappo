@@ -20,8 +20,9 @@
 | F8 | 记录当前鼠标位置为开箱点击点 |
 | F9 | 清空开箱点击点 |
 | F10 | 退出 |
+| F11 | 立即执行一次开箱点击 (测试用, 会打印点到了哪个窗口) |
 
-> 如果 Tappo 以管理员权限运行, 本工具也需要以管理员身份运行, 否则模拟输入可能无效。
+> 如果 Tappo 以管理员权限运行, 本工具也需要以管理员身份运行 (双击 `start_admin.bat`), 否则 Windows 会拦截模拟点击。
 
 ## 配置 (`config.json`)
 
@@ -37,6 +38,10 @@
 | `chest_image` | 宝箱按钮截图, 设置后改用图像识别 (只有宝箱出现时才点) | `""` |
 | `image_confidence` | 图像匹配阈值 | `0.85` |
 | `restore_cursor` | 开箱后把鼠标移回原位 | `true` |
+| `click_method` | `sendinput` 模拟真实鼠标 / `message` 直接给窗口发鼠标消息 / `both` 两种都用 | `both` |
+| `click_hover_seconds` | 鼠标移到按钮后停留多久再按下 | `0.2` |
+| `click_hold_seconds` | 鼠标按下保持多久 | `0.12` |
+| `focus_window` | 点击前先把目标窗口切到前台 | `true` |
 | `auto_start_input` / `auto_start_chest` | 启动后立即开启 | `false` |
 
 ### 图像模式 (可选)
@@ -49,6 +54,13 @@ pip install pyautogui opencv-python pillow
 
 把宝箱**可开启状态**的按钮截个小图存为 `chest.png`, 在 `config.json` 里设置 `"chest_image": "chest.png"`。
 此时 `chest_points` 里记录的点会作为点开宝箱之后依次点击的"领取/确定"按钮。
+
+## 鼠标移过去了但没点开宝箱?
+
+1. 用 **`start_admin.bat`** 以管理员身份运行 (最常见原因: Tappo 权限更高, 点击被系统拦截, 但移动鼠标不受影响)
+2. 按 `F11` 测试一次, 看控制台打印的窗口标题是不是 Tappo; 出现"模拟输入被系统拦截"的警告也说明是权限问题
+3. 把 `click_hover_seconds` 调到 `0.5`, `click_hold_seconds` 调到 `0.2` 试试
+4. 分别把 `click_method` 改成 `sendinput` 或 `message` 试试哪种有效 (`both` 可能会在同一位置点两次)
 
 ## 提示
 

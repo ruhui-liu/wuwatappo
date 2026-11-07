@@ -14,6 +14,7 @@ Wuwa Tappo 自动点击 + 自动开宝箱工具 (仅 Windows)
   F8  把当前鼠标位置追加为一个开箱点击点 (按顺序点击)
   F9  清空所有开箱点击点
   F10 退出
+  F11 立即执行一次开箱点击 (用来测试点击是否生效)
 """
 import ctypes
 import json
@@ -45,6 +46,15 @@ DEFAULT_CONFIG = {
     "image_confidence": 0.85,
     # 开箱后是否把鼠标移回原来的位置
     "restore_cursor": True,
+    # 开箱点击方式: "sendinput" 模拟真实鼠标; "message" 直接给窗口发鼠标消息;
+    # "both" 两种都用 (默认, 兼容性最好)
+    "click_method": "both",
+    # 鼠标移到按钮上后先停留多久再按下 (让 Tappo 识别到悬停)
+    "click_hover_seconds": 0.2,
+    # 鼠标按下保持多久 (太短可能识别不到)
+    "click_hold_seconds": 0.12,
+    # 点击前是否先把目标窗口切到前台
+    "focus_window": True,
     # 启动时是否立即开启
     "auto_start_input": False,
     "auto_start_chest": False,
@@ -60,7 +70,8 @@ VK = {
 for _c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789":
     VK[_c.lower()] = ord(_c)
 
-HOTKEY_INPUT, HOTKEY_CHEST, HOTKEY_ADD, HOTKEY_CLEAR, HOTKEY_EXIT = 0x75, 0x76, 0x77, 0x78, 0x79  # F6..F10
+HOTKEY_INPUT, HOTKEY_CHEST, HOTKEY_ADD, HOTKEY_CLEAR, HOTKEY_EXIT, HOTKEY_TEST = (
+    0x75, 0x76, 0x77, 0x78, 0x79, 0x7A)  # F6..F11
 
 # ---------------------------------------------------------------- Win32 ----
 if sys.platform != "win32":
@@ -71,7 +82,11 @@ user32 = ctypes.WinDLL("user32", use_last_error=True)
 
 INPUT_MOUSE, INPUT_KEYBOARD = 0, 1
 KEYEVENTF_KEYUP = 0x0002
-MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP = 0x0002, 0x0004
+MOUSEEVENTF_MOVE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP = 0x0001, 0x0002, 0x0004
+MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_VIRTUALDESK = 0x8000, 0x4000
+WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON = 0x0200, 0x0201, 0x0202, 0x0001
+GA_ROOT = 2
+SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 76, 77, 78, 79
 ULONG_PTR = ctypes.c_size_t
 
 
@@ -102,6 +117,25 @@ user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
 user32.MapVirtualKeyW.argtypes = (wintypes.UINT, wintypes.UINT)
 user32.GetAsyncKeyState.argtypes = (ctypes.c_int,)
 user32.GetAsyncKeyState.restype = ctypes.c_short
+user32.WindowFromPoint.argtypes = (wintypes.POINT,)
+user32.WindowFromPoint.restype = wintypes.HWND
+user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
+user32.GetAncestor.restype = wintypes.HWND
+user32.ScreenToClient.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.POINT))
+user32.PostMessageW.argtypes = (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+user32.SetForegroundWindow.argtypes = (wintypes.HWND,)
+user32.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+user32.GetSystemMetrics.argtypes = (ctypes.c_int,)
+
+
+def is_admin():
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+_warned_blocked = False
 
 try:  # 让坐标在高 DPI 缩放下也准确
     ctypes.WinDLL("shcore").SetProcessDpiAwareness(2)
@@ -113,8 +147,14 @@ except Exception:
 
 
 def _send(*inputs):
+    global _warned_blocked
     arr = (INPUT * len(inputs))(*inputs)
-    user32.SendInput(len(inputs), arr, ctypes.sizeof(INPUT))
+    sent = user32.SendInput(len(inputs), arr, ctypes.sizeof(INPUT))
+    if sent != len(inputs) and not _warned_blocked:
+        _warned_blocked = True
+        print(f"[警告] 模拟输入被系统拦截 (SendInput 返回 {sent}, 错误码 {ctypes.get_last_error()})。"
+              "\n       通常是因为 Tappo 以管理员权限运行: 请用 start_admin.bat 以管理员身份启动本工具。")
+    return sent
 
 
 def press_key(vk):
@@ -126,10 +166,22 @@ def press_key(vk):
     _send(up)
 
 
-def left_click():
+def left_click(hold=None):
     _send(INPUT(type=INPUT_MOUSE, mi=MOUSEINPUT(dwFlags=MOUSEEVENTF_LEFTDOWN)))
-    time.sleep(random.uniform(0.03, 0.06))
+    time.sleep(hold if hold is not None else random.uniform(0.03, 0.06))
     _send(INPUT(type=INPUT_MOUSE, mi=MOUSEINPUT(dwFlags=MOUSEEVENTF_LEFTUP)))
+
+
+def mouse_move_abs(x, y):
+    """用 SendInput 产生真实的鼠标移动事件 (SetCursorPos 不会让部分程序收到移动/悬停)。"""
+    vx = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+    vy = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+    vw = max(1, user32.GetSystemMetrics(SM_CXVIRTUALSCREEN) - 1)
+    vh = max(1, user32.GetSystemMetrics(SM_CYVIRTUALSCREEN) - 1)
+    nx = int(round((x - vx) * 65535 / vw))
+    ny = int(round((y - vy) * 65535 / vh))
+    _send(INPUT(type=INPUT_MOUSE, mi=MOUSEINPUT(
+        dx=nx, dy=ny, dwFlags=MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)))
 
 
 def get_cursor():
@@ -138,10 +190,58 @@ def get_cursor():
     return pt.x, pt.y
 
 
-def click_at(x, y):
-    user32.SetCursorPos(int(x), int(y))
-    time.sleep(0.05)
-    left_click()
+CLICK_CFG = dict(DEFAULT_CONFIG)
+
+
+def window_at(x, y):
+    hwnd = user32.WindowFromPoint(wintypes.POINT(int(x), int(y)))
+    root = user32.GetAncestor(hwnd, GA_ROOT) if hwnd else None
+    return hwnd, root
+
+
+def window_title(hwnd):
+    buf = ctypes.create_unicode_buffer(256)
+    user32.GetWindowTextW(hwnd, buf, 256)
+    return buf.value
+
+
+def _post_click(hwnd, x, y, hold):
+    pt = wintypes.POINT(int(x), int(y))
+    user32.ScreenToClient(hwnd, ctypes.byref(pt))
+    lparam = ((pt.y & 0xFFFF) << 16) | (pt.x & 0xFFFF)
+    user32.PostMessageW(hwnd, WM_MOUSEMOVE, 0, lparam)
+    time.sleep(0.03)
+    user32.PostMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lparam)
+    time.sleep(hold)
+    user32.PostMessageW(hwnd, WM_LBUTTONUP, 0, lparam)
+
+
+def click_at(x, y, verbose=False):
+    cfg = CLICK_CFG
+    method = str(cfg.get("click_method", "both")).lower()
+    hover = float(cfg.get("click_hover_seconds", 0.2))
+    hold = float(cfg.get("click_hold_seconds", 0.12))
+    x, y = int(x), int(y)
+
+    # 移动: 先 SetCursorPos 保证到位, 再发几次真实移动事件让程序识别悬停
+    user32.SetCursorPos(x, y)
+    for dx in (1, -1, 0):
+        mouse_move_abs(x + dx, y)
+        time.sleep(0.02)
+
+    hwnd, root = window_at(x, y)
+    if verbose:
+        print(f"    目标 ({x},{y}) 窗口: {window_title(root) or '(无标题)'} hwnd={root}")
+    if cfg.get("focus_window", True) and root:
+        user32.SetForegroundWindow(root)
+    time.sleep(hover)
+
+    if method in ("sendinput", "both"):
+        left_click(hold)
+    if method in ("message", "both") and hwnd:
+        if method == "both":
+            time.sleep(0.15)
+        _post_click(hwnd, x, y, hold)
 
 
 def key_pressed_once(vk, _state={}):
@@ -190,7 +290,7 @@ def find_chest_by_image(cfg):
     return (box.x, box.y) if box else None
 
 
-def open_chest(cfg):
+def open_chest(cfg, verbose=False):
     origin = get_cursor()
     try:
         if cfg.get("chest_image"):
@@ -198,12 +298,12 @@ def open_chest(cfg):
             if not pos:
                 print(time.strftime("[%H:%M:%S]"), "没找到可开的宝箱")
                 return
-            click_at(*pos)
+            click_at(*pos, verbose=verbose)
             print(time.strftime("[%H:%M:%S]"), f"点击宝箱 {pos}")
             # 图像模式下, 额外记录的点作为"领取/确定"等后续按钮
             for x, y in cfg["chest_points"]:
                 time.sleep(cfg["chest_click_delay_seconds"])
-                click_at(x, y)
+                click_at(x, y, verbose=verbose)
         else:
             if not cfg["chest_points"]:
                 print("[开箱] 还没有记录点击点: 把鼠标放到宝箱按钮上按 F8")
@@ -211,7 +311,7 @@ def open_chest(cfg):
             for i, (x, y) in enumerate(cfg["chest_points"]):
                 if i:
                     time.sleep(cfg["chest_click_delay_seconds"])
-                click_at(x, y)
+                click_at(x, y, verbose=verbose)
             print(time.strftime("[%H:%M:%S]"), f"已执行开箱点击 x{len(cfg['chest_points'])}")
     finally:
         if cfg.get("restore_cursor", True):
@@ -221,6 +321,7 @@ def open_chest(cfg):
 # ----------------------------------------------------------------- main ----
 def main():
     cfg = load_config()
+    CLICK_CFG.update(cfg)
     key_name = str(cfg["key"]).lower()
     if cfg["input_mode"] == "key" and key_name not in VK:
         print(f"[错误] 不支持的按键 '{cfg['key']}', 可选: {', '.join(sorted(VK))}")
@@ -240,6 +341,9 @@ def main():
 
     print(__doc__)
     print(f"配置文件: {CONFIG_PATH}")
+    print(f"管理员权限: {'是' if is_admin() else '否'}"
+          + ("" if is_admin() else "  (如果点击无效, 请用 start_admin.bat 以管理员身份运行)"))
+    print(f"点击方式: {cfg.get('click_method')}")
     status()
 
     while True:
@@ -261,6 +365,9 @@ def main():
             cfg["chest_points"].append(p)
             save_config(cfg)
             print(f"  已添加开箱点 #{len(cfg['chest_points'])}: {p}")
+        if key_pressed_once(HOTKEY_TEST):
+            print("  [测试] 执行一次开箱点击:")
+            open_chest(cfg, verbose=True)
         if key_pressed_once(HOTKEY_CLEAR):
             cfg["chest_points"] = []
             save_config(cfg)
