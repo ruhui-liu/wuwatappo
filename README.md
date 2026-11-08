@@ -2,7 +2,9 @@
 
 给 Wuwa Tappo (Windows 桌面宠物, Wuthering Waves × Bongo Cat) 用的小工具:
 
-- **自动输入**: 定时模拟按键 (默认 `Shift`), 让 Tappo 计数、给宝箱充能
+- **自动输入**: 每轮同时按下 12 个键 (F13~F24), 让 Tappo 计数、给宝箱充能。
+  F13~F24 是普通键盘上没有的键, 系统和常用软件都不响应, **挂着它也能正常打字、玩游戏**
+- **不抢鼠标**: 自动开箱会等你停止操作几秒后才执行, 点完把鼠标和窗口焦点还给你
 - **自动开箱**: 定时点击你记录好的宝箱按钮位置 (可附带后续的"领取/确定"按钮), 或者用截图识别宝箱
 
 ## 使用
@@ -29,8 +31,11 @@
 | 字段 | 说明 | 默认 |
 |---|---|---|
 | `input_mode` | `key` 模拟按键; `click` 在当前鼠标处左键 (会点到其它窗口, 慎用) | `key` |
-| `key` | 模拟的按键: `shift` `ctrl` `space` `f13`~`f20` `a`~`z` `0`~`9` 等 | `shift` |
-| `inputs_per_second` | 每秒模拟次数 | `10` |
+| `keys` | 每轮同时按下的键列表, 可选 `f13`~`f24` `shift` `ctrl` `space` `a`~`z` `0`~`9` 等 | `f13`~`f24` 共 12 个 |
+| `inputs_per_second` | 每秒按几轮 (每秒敲击数 = 轮数 × 键数) | `10` |
+| `key_hold_seconds` | 每轮按下保持多久 | `0.01` |
+| `pause_input_when_active` | 检测到你在操作键鼠时暂停自动输入 | `false` |
+| `chest_wait_idle_seconds` | 你停止操作多少秒后才自动开箱 (`0` = 不等) | `3` |
 | `jitter` | 间隔随机抖动比例 | `0.2` |
 | `chest_interval_seconds` | 每隔多少秒尝试开箱 | `30` |
 | `chest_click_delay_seconds` | 多个开箱点之间的等待 | `1.5` |
@@ -64,6 +69,9 @@ pip install pyautogui opencv-python pillow
 
 ## 提示
 
-- 如果 `Shift` 不被 Tappo 计数, 换成 `space` 或字母键试试 (注意会输入到当前焦点窗口, 可以把焦点放在记事本或桌面上)。
+- 开启自动输入后看 Tappo 的计数涨得快不快, 确认 F13~F24 有被计入。如果没被计入, 把 `keys` 换成 `["shift", "ctrl"]` 之类
+  (注意: Shift/Ctrl 会和你正在按的键组合, 这时建议把 `pause_input_when_active` 设成 `true`)。
+- 如果 Tappo 对计数有速度上限, 调高轮数或键数也不会更快, 可以适当降低以免浪费。
+- 旧版 `config.json` 里的 `"key": "shift"` 会自动升级成新的 `keys`。
 - 自动开箱会短暂移动鼠标并点击, 挂机时使用效果最好。
 - 本工具只模拟普通键鼠输入, 不修改游戏文件或内存; 是否符合官方规则请自行判断。

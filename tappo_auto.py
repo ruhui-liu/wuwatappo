@@ -3,7 +3,8 @@
 Wuwa Tappo 自动点击 + 自动开宝箱工具 (仅 Windows)
 
 原理:
-  - 自动输入: 通过 Win32 SendInput 定时模拟按键/鼠标点击, Tappo 会把它计入敲击数, 从而给宝箱充能。
+  - 自动输入: 通过 Win32 SendInput 定时模拟按键, Tappo 会把它计入敲击数, 从而给宝箱充能。
+      默认同时按下 F13~F24 (普通键盘上没有这些键, 几乎所有程序都不响应), 不影响正常打字和操作。
   - 自动开箱: 两种方式任选
       1) 坐标模式: 用热键记录宝箱按钮(以及之后需要点的"确定/领取"按钮)的位置, 定时依次点击。
       2) 图像模式: 提供宝箱按钮截图, 屏幕上找到它才点击 (需要 pip install pyautogui opencv-python pillow)。
@@ -29,10 +30,17 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.j
 DEFAULT_CONFIG = {
     # 自动输入方式: "key" 模拟按键, "click" 在当前鼠标位置左键点击 (不推荐, 会点到别的窗口)
     "input_mode": "key",
-    # 模拟的按键 (虚拟键码名), 默认 Shift: 在绝大多数程序里单按 Shift 不会产生任何效果
-    "key": "shift",
-    # 每秒模拟次数
+    # 每次同时按下的按键列表 (每个键都算一次敲击)
+    # 默认 F13~F24: 实体键盘上没有这些键, 系统和常用软件都不会响应, 不会干扰你打字
+    "keys": ["f13", "f14", "f15", "f16", "f17", "f18", "f19", "f20", "f21", "f22", "f23", "f24"],
+    # 每秒按几轮 (每轮把 keys 里的键全部按一次, 所以每秒敲击数 = 轮数 x 键数)
     "inputs_per_second": 10,
+    # 每轮按下后保持多久再松开
+    "key_hold_seconds": 0.01,
+    # 检测到你在用键盘/鼠标时是否暂停自动输入 (F13~F24 一般不会干扰, 默认不暂停)
+    "pause_input_when_active": False,
+    # 你停止操作多少秒后才执行自动开箱 (开箱要移动鼠标, 避免抢你的鼠标); 0 = 不等待
+    "chest_wait_idle_seconds": 3,
     # 每次间隔的随机抖动比例 (0~1)
     "jitter": 0.2,
     # 每隔多少秒尝试开一次宝箱
@@ -65,6 +73,7 @@ VK = {
     "lshift": 0xA0, "rshift": 0xA1, "lctrl": 0xA2, "rctrl": 0xA3,
     "f13": 0x7C, "f14": 0x7D, "f15": 0x7E, "f16": 0x7F,
     "f17": 0x80, "f18": 0x81, "f19": 0x82, "f20": 0x83,
+    "f21": 0x84, "f22": 0x85, "f23": 0x86, "f24": 0x87,
     "scrolllock": 0x91, "numlock": 0x90,
 }
 for _c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789":
@@ -157,13 +166,17 @@ def _send(*inputs):
     return sent
 
 
-def press_key(vk):
-    scan = user32.MapVirtualKeyW(vk, 0)
-    down = INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(wVk=vk, wScan=scan, dwFlags=0))
-    up = INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(wVk=vk, wScan=scan, dwFlags=KEYEVENTF_KEYUP))
-    _send(down)
-    time.sleep(random.uniform(0.02, 0.05))
-    _send(up)
+def press_keys(vks, hold=0.01):
+    """把多个键一起按下再一起松开, 每个键都是一次独立的按键事件。"""
+    downs, ups = [], []
+    for vk in vks:
+        scan = user32.MapVirtualKeyW(vk, 0)
+        downs.append(INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(wVk=vk, wScan=scan, dwFlags=0)))
+        ups.append(INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(wVk=vk, wScan=scan, dwFlags=KEYEVENTF_KEYUP)))
+    _send(*downs)
+    if hold > 0:
+        time.sleep(hold)
+    _send(*ups)
 
 
 def left_click(hold=None):
@@ -191,6 +204,81 @@ def get_cursor():
 
 
 CLICK_CFG = dict(DEFAULT_CONFIG)
+
+# ------------------------------------------------------ 真人操作检测 ----
+# 用低级键盘/鼠标钩子监听输入, 带 "INJECTED" 标记的是程序模拟的 (包括本工具), 其余是你真实的操作。
+import threading
+
+LRESULT = ctypes.c_ssize_t
+HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+WH_KEYBOARD_LL, WH_MOUSE_LL = 13, 14
+LLKHF_INJECTED, LLMHF_INJECTED = 0x10, 0x01
+
+
+class KBDLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [("vkCode", wintypes.DWORD), ("scanCode", wintypes.DWORD), ("flags", wintypes.DWORD),
+                ("time", wintypes.DWORD), ("dwExtraInfo", ULONG_PTR)]
+
+
+class MSLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [("pt", wintypes.POINT), ("mouseData", wintypes.DWORD), ("flags", wintypes.DWORD),
+                ("time", wintypes.DWORD), ("dwExtraInfo", ULONG_PTR)]
+
+
+user32.SetWindowsHookExW.argtypes = (ctypes.c_int, HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD)
+user32.SetWindowsHookExW.restype = wintypes.HHOOK
+user32.CallNextHookEx.argtypes = (wintypes.HHOOK, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+user32.CallNextHookEx.restype = LRESULT
+user32.GetMessageW.argtypes = (ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT)
+user32.GetForegroundWindow.restype = wintypes.HWND
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32.GetModuleHandleW.argtypes = (wintypes.LPCWSTR,)
+kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+
+last_user_input = 0.0  # time.monotonic() of last real (non-injected) input
+
+
+def _kb_proc(n, wparam, lparam):
+    global last_user_input
+    if n >= 0:
+        info = ctypes.cast(lparam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+        if not info.flags & LLKHF_INJECTED:
+            last_user_input = time.monotonic()
+    return user32.CallNextHookEx(None, n, wparam, lparam)
+
+
+def _ms_proc(n, wparam, lparam):
+    global last_user_input
+    if n >= 0:
+        info = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+        if not info.flags & LLMHF_INJECTED:
+            last_user_input = time.monotonic()
+    return user32.CallNextHookEx(None, n, wparam, lparam)
+
+
+_hook_refs = [HOOKPROC(_kb_proc), HOOKPROC(_ms_proc)]  # 必须保持引用, 否则会被回收
+
+
+def start_activity_monitor():
+    ok = threading.Event()
+
+    def run():
+        hmod = kernel32.GetModuleHandleW(None)
+        h1 = user32.SetWindowsHookExW(WH_KEYBOARD_LL, _hook_refs[0], hmod, 0)
+        h2 = user32.SetWindowsHookExW(WH_MOUSE_LL, _hook_refs[1], hmod, 0)
+        if h1 and h2:
+            ok.set()
+        msg = wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            pass
+
+    threading.Thread(target=run, daemon=True).start()
+    ok.wait(1.0)
+    return ok.is_set()
+
+
+def user_idle_seconds():
+    return time.monotonic() - last_user_input
 
 
 def window_at(x, y):
@@ -261,8 +349,10 @@ def load_config():
                 cfg.update(json.load(f))
         except Exception as e:
             print(f"[警告] 读取 config.json 失败, 使用默认配置: {e}")
-    else:
-        save_config(cfg)
+    if "key" in cfg:  # 旧版单键配置 -> 新版多键
+        cfg.pop("key")
+        print("[提示] 已升级配置: 改为同时按 F13~F24 (见 config.json 的 \"keys\")")
+    save_config(cfg)  # 把新增的配置项也写进文件, 方便修改
     return cfg
 
 
@@ -292,6 +382,7 @@ def find_chest_by_image(cfg):
 
 def open_chest(cfg, verbose=False):
     origin = get_cursor()
+    prev_fg = user32.GetForegroundWindow()
     try:
         if cfg.get("chest_image"):
             pos = find_chest_by_image(cfg)
@@ -316,17 +407,22 @@ def open_chest(cfg, verbose=False):
     finally:
         if cfg.get("restore_cursor", True):
             user32.SetCursorPos(*origin)
+        if prev_fg:  # 把焦点还给你原来正在用的窗口
+            user32.SetForegroundWindow(prev_fg)
 
 
 # ----------------------------------------------------------------- main ----
 def main():
     cfg = load_config()
     CLICK_CFG.update(cfg)
-    key_name = str(cfg["key"]).lower()
-    if cfg["input_mode"] == "key" and key_name not in VK:
-        print(f"[错误] 不支持的按键 '{cfg['key']}', 可选: {', '.join(sorted(VK))}")
+    keys = cfg["keys"] if isinstance(cfg["keys"], list) else [cfg["keys"]]
+    bad = [k for k in keys if str(k).lower() not in VK]
+    if cfg["input_mode"] == "key" and (bad or not keys):
+        print(f"[错误] 不支持的按键 {bad}, 可选: {', '.join(sorted(VK))}")
         sys.exit(1)
-    vk = VK.get(key_name)
+    vks = [VK[str(k).lower()] for k in keys]
+    hold = max(0.0, float(cfg.get("key_hold_seconds", 0.01)))
+    monitor_ok = start_activity_monitor()
 
     input_on = bool(cfg["auto_start_input"])
     chest_on = bool(cfg["auto_start_chest"])
@@ -344,6 +440,10 @@ def main():
     print(f"管理员权限: {'是' if is_admin() else '否'}"
           + ("" if is_admin() else "  (如果点击无效, 请用 start_admin.bat 以管理员身份运行)"))
     print(f"点击方式: {cfg.get('click_method')}")
+    print(f"自动输入: 每轮同时按 {len(vks)} 个键 {keys}, 每秒 {cfg['inputs_per_second']} 轮"
+          f" ≈ {len(vks) * float(cfg['inputs_per_second']):.0f} 次/秒")
+    if not monitor_ok:
+        print("[警告] 无法检测真人操作, 开箱不会等待你空闲")
     status()
 
     while True:
@@ -373,18 +473,22 @@ def main():
             save_config(cfg)
             print("  已清空开箱点")
 
-        if chest_on and now >= next_chest:
+        idle_need = float(cfg.get("chest_wait_idle_seconds", 0))
+        if chest_on and now >= next_chest and (not monitor_ok or user_idle_seconds() >= idle_need):
             open_chest(cfg)
             next_chest = time.monotonic() + max(1.0, float(cfg["chest_interval_seconds"]))
             next_input = time.monotonic()
 
-        if input_on and now >= next_input:
+        user_busy = (monitor_ok and cfg.get("pause_input_when_active")
+                     and user_idle_seconds() < 1.0)
+        if input_on and now >= next_input and not user_busy:
             if cfg["input_mode"] == "click":
                 left_click()
+                count += 1
             else:
-                press_key(vk)
-            count += 1
-            if count % 500 == 0:
+                press_keys(vks, hold)
+                count += len(vks)
+            if count // 1000 != (count - len(vks)) // 1000:
                 status()
             base = 1.0 / rate
             j = float(cfg["jitter"])
